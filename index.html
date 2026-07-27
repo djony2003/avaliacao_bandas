@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#eef6f4" />
+  <title>Banda 5 — Diagnóstico Musical</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="brand-badge">B5</div>
+      <div>
+        <p class="eyebrow">BANDA 5 • DESENVOLVIMENTO MUSICAL</p>
+        <h1>Diagnóstico Musical</h1>
+        <p class="hero-subtitle">
+          Um teste para descobrir seus pontos fortes e o que podemos desenvolver juntos.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section id="welcomeScreen" class="panel welcome-panel">
+        <div class="welcome-copy">
+          <span class="pill">Sem pressão • Sem competição</span>
+          <h2>Vamos descobrir onde você está hoje?</h2>
+          <p>
+            Este não é um teste para “aprovar” ou “reprovar”. Responda com sinceridade.
+            Marcar <strong>“Não sei”</strong> é totalmente normal.
+          </p>
+          <ul class="feature-list">
+            <li>Conhecimento musical geral</li>
+            <li>Ritmo, harmonia e percepção</li>
+            <li>Perguntas do seu instrumento</li>
+            <li>Seu perfil musical ao final</li>
+          </ul>
+          <div class="welcome-actions">
+            <button class="btn btn-primary btn-lg" id="startBtn">Começar diagnóstico</button>
+            <button class="btn btn-secondary btn-lg" id="openEditorBtn">Editar perguntas</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="editorScreen" class="hidden">
+        <div class="editor-heading">
+          <div><p class="eyebrow">PAINEL DO AVALIADOR</p><h2>Editor de perguntas</h2><p>Edite o banco do teste e carregue gravações reais para os exercícios de percepção. Use <strong>Shift + Enter</strong> quando quiser inserir uma nova linha.</p></div>
+          <button class="btn btn-secondary" id="closeEditorBtn">Voltar ao início</button>
+        </div>
+        <div class="panel editor-toolbar">
+          <label>Seção<select id="editorSection" class="field"></select></label>
+          <label id="editorInstrumentWrap" class="hidden">Instrumento<select id="editorInstrument" class="field"></select></label>
+          <button type="button" class="btn btn-primary" id="addQuestionBtn">+ Nova pergunta</button>
+          <button class="btn btn-secondary" id="exportBankBtn">Exportar banco</button>
+          <label class="btn btn-secondary file-button">Importar banco<input id="importBankInput" type="file" accept="application/json,.json"></label>
+          <button class="btn btn-secondary" id="changePasswordBtn">Alterar senha</button>
+          <button class="btn btn-ghost" id="resetBankBtn">Restaurar padrão</button>
+        </div>
+        <div id="editorNotice" class="editor-notice hidden"></div>
+        <div id="editorList" class="editor-list"></div>
+      </section>
+
+      <section id="quizScreen" class="hidden">
+        <div class="quiz-topbar">
+          <div>
+            <div class="section-kicker" id="sectionKicker">Etapa</div>
+            <h2 id="sectionTitle">Identificação</h2>
+          </div>
+          <div class="progress-box">
+            <div class="progress-text"><span id="progressText">Início</span></div>
+            <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+          </div>
+        </div>
+
+        <div id="sectionProgress" class="section-progress" aria-label="Progresso por seção"></div>
+
+        <form id="quizForm" class="panel question-panel" novalidate>
+          <div id="questionContainer"></div>
+
+          <div class="nav-actions">
+            <button type="button" class="btn btn-secondary" id="backBtn">Voltar</button>
+            <button type="button" class="btn btn-primary" id="nextBtn">Continuar</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="resultScreen" class="hidden">
+        <div class="panel result-panel">
+          <div class="result-header">
+            <span class="pill">Diagnóstico concluído</span>
+            <h2 id="resultName">Seu perfil musical</h2>
+            <p id="resultIntro"></p>
+          </div>
+
+          <div id="scoreCards" class="score-grid"></div>
+
+          <div class="result-block">
+            <h3>Seu nível atual</h3>
+            <div id="levelBadge" class="level-badge"></div>
+            <p id="levelDescription"></p>
+          </div>
+
+          <div class="result-block">
+            <h3>Pontos para desenvolver</h3>
+            <div id="developmentList" class="development-list"></div>
+          </div>
+
+          <div class="result-block">
+            <h3>Respostas para revisar</h3>
+            <p class="block-intro">Questões objetivas respondidas incorretamente ou marcadas como “Não sei”.</p>
+            <div id="mistakesList" class="mistakes-list"></div>
+          </div>
+
+          <div class="result-block">
+            <h3>Suas respostas pessoais</h3>
+            <div id="personalAnswers" class="personal-answers"></div>
+          </div>
+
+          <div class="result-actions">
+            <button class="btn btn-primary" id="printPdfBtn">Gerar relatório PDF</button>
+            <button class="btn btn-primary" id="downloadJsonBtn">Baixar resultado</button>
+            <button class="btn btn-secondary" id="downloadCsvBtn">Baixar CSV</button>
+            <button class="btn btn-ghost" id="restartBtn">Refazer teste</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Banda 5 • Crescer juntos, tocar melhor e servir com propósito.</p>
+    </footer>
+  </div>
+
+  <div id="adminDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="adminDialogTitle">
+    <form id="adminDialogForm" class="admin-dialog panel">
+      <div class="dialog-icon">🔒</div>
+      <p class="eyebrow">ACESSO DO AVALIADOR</p>
+      <h2 id="adminDialogTitle">Acesso ao editor</h2>
+      <p id="adminDialogMessage" class="dialog-message"></p>
+      <label id="adminDialogFieldWrap" class="dialog-field-label"><span id="adminDialogLabel">Senha</span><input id="adminDialogInput" class="field" type="password" autocomplete="current-password"></label>
+      <div id="adminDialogError" class="dialog-error hidden"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" id="adminDialogCancel">Cancelar</button>
+        <button type="button" class="btn btn-secondary hidden" id="adminDialogSecondary">Esqueci a senha</button>
+        <button type="submit" class="btn btn-primary" id="adminDialogPrimary">Entrar</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="script.js?v=18"></script>
+</body>
+</html>
