@@ -192,6 +192,7 @@ const questionContainer = $("questionContainer"), sectionTitle = $("sectionTitle
 const progressText = $("progressText"), progressBar = $("progressBar"), sectionProgress = $("sectionProgress"), backBtn = $("backBtn"), nextBtn = $("nextBtn");
 
 $("startBtn").addEventListener("click", startQuiz); backBtn.addEventListener("click", goBack); nextBtn.addEventListener("click", goNext);
+$("quizForm").addEventListener("submit", event => event.preventDefault());
 $("restartBtn").addEventListener("click", restartQuiz); $("downloadJsonBtn").addEventListener("click", downloadJSON); $("downloadCsvBtn").addEventListener("click", downloadCSV);
 $("printPdfBtn").addEventListener("click", generatePDFReport);
 $("openEditorBtn").addEventListener("click", requestEditorAccess); $("closeEditorBtn").addEventListener("click", closeEditor);
