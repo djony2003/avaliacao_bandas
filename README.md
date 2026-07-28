@@ -1,40 +1,90 @@
-# Banda 5 - Diagnóstico Musical
+# Banda 5 — Diagnóstico Musical
 
-Site estático e responsivo para aplicar o diagnóstico musical direcionado da Banda 5.
+Aplicação responsiva para aplicar diagnósticos musicais, receber os resultados dos alunos em um banco centralizado e administrar perguntas e áudios em um painel protegido.
+
+## O que esta versão faz
+
+- Cada aluno começa uma avaliação zerada ao abrir o app.
+- As perguntas são organizadas por seção e por instrumento.
+- O avaliador pode criar, editar, excluir e ordenar perguntas.
+- Exercícios podem usar áudio sintetizado ou gravações reais em MP3, WAV, M4A, OGG e formatos compatíveis.
+- As gravações publicadas ficam disponíveis para todos os alunos.
+- Ao concluir, o aluno envia o resultado diretamente ao banco.
+- A nota enviada pelo navegador é recalculada no banco antes de ser salva.
+- O painel administrativo lista, busca, exporta, revisa, arquiva e exclui resultados.
+- Alterações ainda não publicadas ficam como rascunho neste computador.
+- O relatório individual continua disponível em PDF, JSON e CSV.
+- Ao abrir os arquivos-fonte localmente, sem banco configurado, o app mantém o modo local anterior. O pacote público de `dist/` permanece bloqueado até receber uma configuração válida.
+
+No pacote de produção, o gabarito não é enviado ao navegador. As respostas corretas ficam no esquema privado do banco, e a pontuação é calculada pela função SQL no momento do envio.
+
+## Configuração do banco online
+
+Esta versão usa Supabase para banco de dados, login administrativo e armazenamento dos áudios.
+
+1. Na pasta do projeto, execute `npm run build`. O comando cria o pacote público em `dist/` e atualiza `supabase/seed-default-bank.sql`.
+2. Crie um projeto em [supabase.com](https://supabase.com/).
+3. Abra **SQL Editor**, cole todo o conteúdo de `supabase/schema.sql` e execute.
+4. Ainda no SQL Editor, execute `supabase/seed-default-bank.sql` para publicar o banco inicial. Esse arquivo contém o gabarito e não deve ser hospedado junto com o site.
+5. Em **Authentication > Users**, crie somente a sua conta administrativa com e-mail e senha.
+6. No SQL Editor, autorize essa conta executando:
+
+   ```sql
+   insert into public.admins (user_id)
+   select id from auth.users where email = 'SEU_EMAIL';
+   ```
+
+7. Em **Project Settings > API**, copie a URL do projeto e a chave pública (`publishable` ou `anon`).
+8. Preencha `supabase-config.js`:
+
+   ```js
+   window.BANDA5_SUPABASE = {
+     url: "https://SEU-PROJETO.supabase.co",
+     publishableKey: "SUA_CHAVE_PUBLICA"
+   };
+   ```
+
+9. Execute `npm run build` novamente, para copiar a configuração ao pacote público.
+10. Hospede **somente o conteúdo da pasta `dist/`**. Não publique a raiz do repositório, pois ela contém o banco privado usado para gerar a versão segura.
+
+Nunca coloque a chave `service_role` no projeto ou no navegador. A chave pública é a correta para este app; as regras de segurança de `supabase/schema.sql` garantem que somente a conta registrada em `admins` possa editar perguntas, gerenciar áudios e consultar respostas.
+
+No modo online, a senha do painel passa a ser a senha da conta criada no Supabase. Use uma senha forte; o código local `047232` serve somente enquanto o app estiver em modo local e não deve proteger dados publicados na internet.
+
+## Recuperação de senha
+
+No login administrativo, use **Esqueci a senha**. O Supabase envia um link ao e-mail da conta e o app abre a caixa para cadastrar uma nova senha. Para funcionar no endereço publicado, inclua esse endereço em **Authentication > URL Configuration > Redirect URLs** no painel do Supabase.
+
+## Fluxo dos alunos
+
+1. O aluno abre o mesmo link público da avaliação.
+2. Preenche nome, e-mail e todas as etapas.
+3. Na última pergunta, clica em **Enviar e ver diagnóstico**. O banco valida todas as respostas, recalcula a pontuação e registra somente um envio por protocolo.
+4. Recebe um protocolo curto de confirmação.
+5. O resultado aparece em **Editar perguntas > Respostas recebidas** para o administrador.
 
 ## Estrutura da avaliação
-- Base comum: pulso, dinâmica, estrutura, escuta, preparo e atuação em conjunto.
-- Conhecimento demonstrado: teoria, ritmo, harmonia, transposição e campo harmônico.
-- Percepção: exercícios gerados pelo navegador ou gravações reais carregadas pelo avaliador.
-- Módulos específicos: bateria, baixo, violão, guitarra, teclado e vocal.
-- Plano individual: dificuldade concreta, disponibilidade e meta de 90 dias.
-- Revisão pedagógica: mostra cada questão objetiva incorreta, a resposta esperada e uma orientação de estudo para o líder.
 
-A pontuação geral combina 65% das questões objetivas (incluindo áudio) e 35% das respostas de autoavaliação. O relatório PDF inclui uma página específica com as respostas que precisam ser revisadas. O resultado deve ser complementado por observação prática do líder.
+- Questões gerais, harmonia, escalas e intervalos.
+- Percepção musical com exercícios de áudio.
+- Divisão de vozes para cordas e teclas.
+- Técnica específica para bateria, baixo, violão, guitarra, teclado e vocal.
+- Prática em conjunto e plano individual de 90 dias.
+- Revisão pedagógica das respostas incorretas com explicações.
 
-## Como usar
-1. Abra `index.html` no navegador.
-2. O participante responde pelo celular ou computador.
-3. Cada nova aplicação começa sem respostas ou progresso anteriores.
-4. Ao final, o participante vê um resumo por áreas e pode baixar o resultado em JSON ou CSV.
-5. O botão **Gerar relatório PDF** abre um documento A4; na janela de impressão, escolha **Salvar como PDF**.
+A pontuação geral combina 65% das questões objetivas e auditivas com 35% da autoavaliação. O resultado é um instrumento pedagógico e deve ser complementado por observação prática do líder.
 
-## Editor do avaliador
+## Arquivos principais
 
-- O botão **Editar perguntas** abre a área protegida por senha.
-- É possível criar, editar, excluir e ordenar perguntas.
-- Os formatos incluem texto curto, e-mail, número, texto longo, alternativas, escalas e exercícios com áudio.
-- Perguntas e configurações ficam no armazenamento local do navegador.
-- Gravações ficam no IndexedDB do navegador e não são incluídas no JSON exportado.
+- `index.html` — telas do diagnóstico e painel administrativo.
+- `styles.css` — layout responsivo.
+- `script.js` — perguntas, navegação, editor, pontuação e painel.
+- `backend.js` — integração com banco, login e armazenamento.
+- `supabase-config.js` — endereço e chave pública do projeto.
+- `supabase/schema.sql` — tabelas, regras de acesso e área de áudios.
+- `supabase/seed-default-bank.sql` — banco inicial completo e privado, gerado pelo build.
+- `tools/build-production.mjs` — separa o gabarito e prepara o site seguro em `dist/`.
 
-## Arquivos
-- `index.html` — estrutura do site
-- `styles.css` — visual
-- `script.js` — perguntas, navegação, pontuação e exportação
+## Validação local
 
-## Publicação
-
-O projeto atual é estático. Para receber respostas automaticamente será necessário conectar a interface a uma API e a um banco de dados. Até essa etapa, os participantes podem baixar os resultados em JSON, CSV ou PDF.
-
-## Observação
-O resultado é um diagnóstico pedagógico, não uma avaliação de valor pessoal ou espiritual.
+Use `npm run check` para verificar a sintaxe JavaScript e `npm run build` para regenerar o pacote de produção. O diretório `dist/` é ignorado pelo Git porque deve sempre ser recriado a partir do código versionado.

@@ -23,7 +23,7 @@
     <main>
       <section id="welcomeScreen" class="panel welcome-panel">
         <div class="welcome-copy">
-          <span class="pill">Sem pressão • Sem competição</span>
+          <div class="welcome-pills"><span class="pill">Sem pressão • Sem competição</span><span class="pill cloud-pill" id="cloudStatus">Modo local</span></div>
           <h2>Vamos descobrir onde você está hoje?</h2>
           <p>
             Este não é um teste para “aprovar” ou “reprovar”. Responda com sinceridade.
@@ -35,6 +35,7 @@
             <li>Perguntas do seu instrumento</li>
             <li>Seu perfil musical ao final</li>
           </ul>
+          <p class="privacy-note">🔒 Seu nome, e-mail e respostas serão usados somente pela liderança da Banda 5 para acompanhamento musical e poderão ser excluídos pelo avaliador.</p>
           <div class="welcome-actions">
             <button class="btn btn-primary btn-lg" id="startBtn">Começar diagnóstico</button>
             <button class="btn btn-secondary btn-lg" id="openEditorBtn">Editar perguntas</button>
@@ -44,20 +45,28 @@
 
       <section id="editorScreen" class="hidden">
         <div class="editor-heading">
-          <div><p class="eyebrow">PAINEL DO AVALIADOR</p><h2>Editor de perguntas</h2><p>Edite o banco do teste e carregue gravações reais para os exercícios de percepção. Use <strong>Shift + Enter</strong> quando quiser inserir uma nova linha.</p></div>
-          <button class="btn btn-secondary" id="closeEditorBtn">Voltar ao início</button>
+          <div><p class="eyebrow">PAINEL DO AVALIADOR</p><h2 id="editorPanelTitle">Editor de perguntas</h2><p id="editorPanelDescription">Edite o banco do teste e carregue gravações reais para os exercícios de percepção. A tecla <strong>Return</strong> pode ser usada normalmente durante a edição.</p></div>
+          <button class="btn btn-secondary" id="closeEditorBtn">Bloquear e voltar</button>
         </div>
         <div class="panel editor-toolbar">
-          <label>Seção<select id="editorSection" class="field"></select></label>
-          <label id="editorInstrumentWrap" class="hidden">Instrumento<select id="editorInstrument" class="field"></select></label>
-          <button type="button" class="btn btn-primary" id="addQuestionBtn">+ Nova pergunta</button>
-          <button class="btn btn-secondary" id="exportBankBtn">Exportar banco</button>
-          <label class="btn btn-secondary file-button">Importar banco<input id="importBankInput" type="file" accept="application/json,.json"></label>
-          <button class="btn btn-secondary" id="changePasswordBtn">Alterar senha</button>
-          <button class="btn btn-ghost" id="resetBankBtn">Restaurar padrão</button>
+          <label id="editorSectionWrap" class="question-admin-control">Seção<select id="editorSection" class="field"></select></label>
+          <label id="editorInstrumentWrap" class="question-admin-control hidden">Instrumento<select id="editorInstrument" class="field"></select></label>
+          <button type="button" class="btn btn-primary question-admin-control" id="addQuestionBtn">+ Nova pergunta</button>
+          <button type="button" class="btn btn-primary question-admin-control hidden" id="saveCloudBtn">Salvar e publicar</button>
+          <button type="button" class="btn btn-secondary admin-view-tab hidden" id="showQuestionsBtn">Perguntas</button>
+          <button type="button" class="btn btn-secondary admin-view-tab hidden" id="showResponsesBtn">Respostas recebidas</button>
+          <button class="btn btn-secondary question-admin-control" id="exportBankBtn">Exportar banco</button>
+          <label class="btn btn-secondary file-button question-admin-control">Importar banco<input id="importBankInput" type="file" accept="application/json,.json"></label>
+          <button class="btn btn-secondary question-admin-control" id="changePasswordBtn">Alterar senha</button>
+          <button type="button" class="btn btn-ghost hidden" id="cloudLogoutBtn">Sair da conta</button>
+          <button class="btn btn-ghost question-admin-control" id="resetBankBtn">Restaurar padrão</button>
         </div>
         <div id="editorNotice" class="editor-notice hidden"></div>
         <div id="editorList" class="editor-list"></div>
+        <div id="responsesPanel" class="hidden">
+          <div class="panel responses-header"><div><p class="eyebrow">RESULTADOS CENTRALIZADOS</p><h3>Respostas recebidas</h3><p id="responsesSummary">Carregando resultados...</p></div><div class="responses-actions"><input id="responsesSearch" class="field" type="search" placeholder="Buscar por nome, e-mail ou instrumento" aria-label="Buscar respostas"><button type="button" class="btn btn-secondary" id="refreshResponsesBtn">Atualizar</button><button type="button" class="btn btn-secondary" id="exportResponsesBtn">Baixar CSV</button></div></div>
+          <div id="responsesList" class="responses-list"></div>
+        </div>
       </section>
 
       <section id="quizScreen" class="hidden">
@@ -117,11 +126,13 @@
           </div>
 
           <div class="result-actions">
+            <button class="btn btn-primary hidden" id="submitResultBtn">Enviar respostas ao avaliador</button>
             <button class="btn btn-primary" id="printPdfBtn">Gerar relatório PDF</button>
             <button class="btn btn-primary" id="downloadJsonBtn">Baixar resultado</button>
             <button class="btn btn-secondary" id="downloadCsvBtn">Baixar CSV</button>
             <button class="btn btn-ghost" id="restartBtn">Refazer teste</button>
           </div>
+          <div id="submissionStatus" class="submission-status hidden"></div>
         </div>
       </section>
     </main>
@@ -147,6 +158,9 @@
     </form>
   </div>
 
-  <script src="script.js?v=18"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
+  <script src="backend.js"></script>
+  <script src="script.js?v=20"></script>
 </body>
 </html>

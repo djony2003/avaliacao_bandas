@@ -1,5 +1,7 @@
 const STORAGE_KEY = "banda5_diagnostico_v3";
 const QUESTION_BANK_KEY = "banda5_question_bank_v1";
+const CLOUD_DRAFT_KEY = "banda5_cloud_question_draft_v1";
+const AUDIO_CLEANUP_KEY = "banda5_audio_cleanup_v1";
 const AUDIO_DB_NAME = "banda5_audio_db";
 const ADMIN_HASH_KEY = "banda5_admin_password_hash_v1";
 const DEFAULT_ADMIN_HASH = "547899d34968ca08c8b45fcea4e3d3f69c688b7619524ddda3ac469e220a0220";
@@ -23,6 +25,7 @@ let sections = [
   {
     id: "identificacao", kicker: "Perfil do participante", title: "Sobre você", questions: [
       { id: "nome", type: "text", text: "Qual é o seu nome?", required: true, placeholder: "Digite seu nome" },
+      { id: "email", type: "email", text: "Qual é o seu e-mail?", help: "Usaremos este dado apenas para identificar seu diagnóstico no painel do avaliador.", required: true, placeholder: "nome@exemplo.com" },
       { id: "idade", type: "number", text: "Qual é a sua idade?", required: true, placeholder: "Ex.: 18" },
       { id: "instrumento", type: "single", text: "Qual função será avaliada hoje?", required: true,
         options: ["Bateria", "Baixo", "Violão", "Guitarra", "Teclado", "Vocal"] },
@@ -181,7 +184,7 @@ let sections = [
 const DEFAULT_SECTIONS = JSON.parse(JSON.stringify(sections));
 loadQuestionBank();
 
-let answers = {}, visibleQuestions = [], currentIndex = 0, audioContext, editorAuthorized = false;
+let answers = {}, visibleQuestions = [], currentIndex = 0, audioContext, editorAuthorized = false, cloudSubmissions = [], submittedProtocol = null, currentSubmissionId = null, verifiedScores = null, verifiedReviewItems = null, cloudBankDirty = false, pendingAudioDeletes = [], stagedAudioUploads = [], publishedSections = null, adminPublishedSections = null, cloudBaseRevision = null, cloudBaseUpdatedAt = null, cloudAssessmentPublished = false;
 localStorage.removeItem(STORAGE_KEY);
 const $ = id => document.getElementById(id);
 const welcomeScreen = $("welcomeScreen"), quizScreen = $("quizScreen"), resultScreen = $("resultScreen"), editorScreen = $("editorScreen");
@@ -195,9 +198,12 @@ $("openEditorBtn").addEventListener("click", requestEditorAccess); $("closeEdito
 $("editorSection").addEventListener("change", renderEditor); $("editorInstrument").addEventListener("change", renderEditor);
 $("addQuestionBtn").addEventListener("click", addEditorQuestion); $("exportBankBtn").addEventListener("click", exportQuestionBank);
 $("importBankInput").addEventListener("change", importQuestionBank); $("resetBankBtn").addEventListener("click", resetQuestionBank); $("changePasswordBtn").addEventListener("click", changeAdminPassword);
+$("saveCloudBtn").addEventListener("click", saveQuestionBankToCloud); $("showQuestionsBtn").addEventListener("click", showQuestionsPanel); $("showResponsesBtn").addEventListener("click", showResponsesPanel);
+$("refreshResponsesBtn").addEventListener("click", loadCloudResponses); $("responsesSearch").addEventListener("input", renderCloudResponses); $("exportResponsesBtn").addEventListener("click", exportCloudResponses);
+$("cloudLogoutBtn").addEventListener("click", cloudAdminLogout); $("submitResultBtn").addEventListener("click", submitDiagnosisToCloud);
 function protectEditorReturn(event) {
   const isReturn = event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter";
-  if (!isReturn || editorScreen.classList.contains("hidden") || !editorScreen.contains(event.target) || event.target.closest("#adminDialog")) return;
+  if (!isReturn || editorScreen.classList.contains("hidden") || !editorScreen.contains(event.target) || event.target.closest("#adminDialog") || !event.target.matches("input, textarea, select")) return;
   event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
   if (event.type === "keydown" && event.target.matches("textarea")) {
     const field = event.target, start = field.selectionStart, end = field.selectionEnd;
@@ -207,6 +213,32 @@ function protectEditorReturn(event) {
 }
 document.addEventListener("keydown", protectEditorReturn, true);
 document.addEventListener("keypress", protectEditorReturn, true);
+initializeCloudApp();
+
+async function initializeCloudApp() {
+  const status = $("cloudStatus"), submitButton = $("submitResultBtn"), startButton = $("startBtn"), editorButton = $("openEditorBtn");
+  status.classList.remove("is-local", "is-online", "is-error");
+  if (!window.BandDB?.configured) {
+    if (window.BANDA5_PRODUCTION_BUILD) {
+      status.textContent = "Configuração pendente"; status.classList.add("is-error");
+      startButton.disabled = true; editorButton.disabled = true;
+      return;
+    }
+    status.textContent = "Modo local"; status.classList.add("is-local");
+    return;
+  }
+  BandDB.onAuthStateChange((event) => { if (event === "PASSWORD_RECOVERY") setTimeout(completeCloudPasswordRecovery, 100); });
+  startButton.disabled = true;
+  status.textContent = "Conectando...";
+  try {
+    const remote = await BandDB.loadQuestionBank();
+    cloudBaseRevision = remote.revision; cloudBaseUpdatedAt = remote.updatedAt;
+    if (remote.sections?.length) { validateQuestionBank(remote.sections, { requireAnswerKey:false }); sections = remote.sections; publishedSections = JSON.parse(JSON.stringify(sections)); cloudBankDirty = false; cloudAssessmentPublished = true; }
+    else { cloudBankDirty = true; cloudAssessmentPublished = false; }
+    status.textContent = cloudAssessmentPublished ? "Banco online" : "Aguardando publicação"; status.classList.add("is-online"); submitButton.classList.remove("hidden");
+  } catch (error) { console.error("Falha ao carregar banco remoto", error); status.textContent = "Banco indisponível"; status.classList.add("is-error"); }
+  finally { startButton.disabled = window.BandDB?.configured && !cloudAssessmentPublished; }
+}
 
 async function sha256(value) {
   const bytes = new TextEncoder().encode(value), digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -222,10 +254,11 @@ function showAdminDialog({ title, message = "", label = "Senha", type = "passwor
   return new Promise(resolve => {
     const finish = (action, value = "") => { dialog.classList.add("hidden"); form.onsubmit = null; $("adminDialogCancel").onclick = null; secondaryBtn.onclick = null; resolve({ action, value }); };
     form.onsubmit = event => { event.preventDefault(); finish("primary", field.value); };
-    $("adminDialogCancel").onclick = () => finish("cancel"); secondaryBtn.onclick = () => finish("secondary");
+    $("adminDialogCancel").onclick = () => finish("cancel"); secondaryBtn.onclick = () => finish("secondary", field.value);
   });
 }
 async function requestEditorAccess() {
+  if (window.BandDB?.configured) return requestCloudAdminAccess();
   if (editorAuthorized) return openEditor();
   const access = await showAdminDialog({ title:"Acesso ao editor", message:"Esta área é exclusiva do administrador do diagnóstico.", label:"Senha do administrador", primary:"Entrar", secondary:"Esqueci a senha" });
   if (access.action === "cancel") return; if (access.action === "secondary") return recoverAdminPassword(); const password = access.value;
@@ -235,6 +268,47 @@ async function requestEditorAccess() {
   if (retry.action === "secondary") return recoverAdminPassword();
   if (retry.action === "primary" && await sha256(retry.value) === expectedHash) { editorAuthorized = true; return openEditor(); }
   if (retry.action === "primary") return requestEditorAccess();
+}
+async function requestCloudAdminAccess() {
+  try {
+    if (editorAuthorized && await BandDB.isAdmin()) return openCloudEditor();
+    const session = await BandDB.getSession();
+    if (session && await BandDB.isAdmin()) { editorAuthorized = true; return openCloudEditor(); }
+  } catch (error) {
+    await showAdminDialog({ title:"Banco indisponível", message:error.message || "Não foi possível verificar a conta administrativa.", primary:"Fechar", input:false, error:"Confira sua conexão e tente novamente." }); return;
+  }
+  const emailDialog = await showAdminDialog({ title:"Login administrativo", message:"Entre com a conta cadastrada como administradora no banco online.", label:"E-mail", type:"email", primary:"Continuar", secondary:"Esqueci a senha" });
+  if (emailDialog.action === "secondary") return requestCloudPasswordReset(emailDialog.value);
+  if (emailDialog.action !== "primary") return;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailDialog.value.trim())) {
+    await showAdminDialog({ title:"E-mail inválido", message:"Informe o e-mail completo da sua conta administrativa.", primary:"Voltar", input:false, error:"Exemplo: nome@dominio.com" });
+    return requestCloudAdminAccess();
+  }
+  const passwordDialog = await showAdminDialog({ title:"Senha da conta", message:`Conta: ${emailDialog.value}`, label:"Senha", primary:"Entrar" });
+  if (passwordDialog.action !== "primary") return;
+  try { await BandDB.signIn(emailDialog.value.trim(), passwordDialog.value); editorAuthorized = true; await openCloudEditor(); if (!editorScreen.classList.contains("hidden")) editorNotice("Painel conectado ao banco online."); }
+  catch (error) { const retry = await showAdminDialog({ title:"Acesso negado", message:error.message || "Não foi possível entrar.", primary:"Tentar novamente", input:false, error:"Confira o e-mail, a senha e a permissão de administrador." }); if (retry.action === "primary") return requestCloudAdminAccess(); }
+}
+
+async function requestCloudPasswordReset(initialEmail = "") {
+  let email = initialEmail.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    const emailDialog = await showAdminDialog({ title:"Recuperar senha", message:"Informe o e-mail da conta administrativa. Você receberá um link para criar uma nova senha.", label:"E-mail", type:"email", primary:"Enviar link" });
+    if (emailDialog.action !== "primary") return;
+    email = emailDialog.value.trim();
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return requestCloudPasswordReset();
+  try {
+    await BandDB.sendPasswordReset(email);
+    await showAdminDialog({ title:"Confira seu e-mail", message:"Se essa conta estiver cadastrada, o banco enviará um link seguro para redefinir a senha.", primary:"Entendi", input:false });
+  } catch (error) { await showAdminDialog({ title:"Não foi possível enviar", message:error.message || "Tente novamente em alguns minutos.", primary:"Fechar", input:false, error:"O pedido de recuperação não foi concluído." }); }
+}
+
+async function completeCloudPasswordRecovery() {
+  const next = await requestNewPassword("Criar nova senha da conta");
+  if (!next) return;
+  try { await BandDB.updatePassword(next); await showAdminDialog({ title:"Senha redefinida", message:"Sua nova senha foi salva. Você já pode abrir o painel administrativo.", primary:"Concluir", input:false }); }
+  catch (error) { await showAdminDialog({ title:"Não foi possível salvar", message:error.message || "Peça um novo link de recuperação e tente novamente.", primary:"Fechar", input:false, error:"A senha não foi alterada." }); }
 }
 async function recoverAdminPassword() {
   const recovery = await showAdminDialog({ title:"Recuperar acesso", message:"Informe o código de recuperação guardado pelo administrador.", label:"Código de recuperação", type:"text", primary:"Validar código" });
@@ -249,23 +323,248 @@ async function requestNewPassword(title) {
   if (confirmation.value !== first.value) { await showAdminDialog({ title:"Senhas diferentes", message:"Os dois campos não correspondem.", primary:"Tentar novamente", input:false, error:"Digite a mesma senha nas duas etapas." }); return requestNewPassword(title); } return first.value;
 }
 async function changeAdminPassword() {
+  if (window.BandDB?.configured) {
+    const next = await requestNewPassword("Alterar senha da conta"); if (!next) return;
+    try { await BandDB.updatePassword(next); await showAdminDialog({ title:"Senha alterada", message:"A nova senha da sua conta administrativa foi salva.", primary:"Concluir", input:false }); }
+    catch (error) { await showAdminDialog({ title:"Não foi possível alterar", message:error.message || "Entre novamente e tente de novo.", primary:"Fechar", input:false, error:"A alteração não foi realizada." }); }
+    return;
+  }
   const currentDialog = await showAdminDialog({ title:"Alterar senha", message:"Confirme sua senha atual antes de criar uma nova.", label:"Senha atual", primary:"Confirmar" }); if (currentDialog.action !== "primary") return; const current = currentDialog.value;
   const expectedHash = localStorage.getItem(ADMIN_HASH_KEY) || DEFAULT_ADMIN_HASH;
   if (await sha256(current) !== expectedHash) return showAdminDialog({ title:"Senha incorreta", message:"A senha atual não confere.", primary:"Fechar", input:false, error:"A alteração não foi realizada." });
   const next = await requestNewPassword("Criar nova senha"); if (!next) return; localStorage.setItem(ADMIN_HASH_KEY, await sha256(next)); await showAdminDialog({ title:"Senha alterada", message:"A nova senha foi salva com sucesso.", primary:"Concluir", input:false });
 }
 
-function loadQuestionBank() {
-  try { const saved = JSON.parse(localStorage.getItem(QUESTION_BANK_KEY)); if (Array.isArray(saved)) sections = saved; } catch (error) { console.warn("Banco de perguntas inválido", error); }
+function validateQuestionBank(bank, { requireAnswerKey = true } = {}) {
+  if (!Array.isArray(bank) || !bank.length || bank.length > 50) throw new Error("O banco precisa ter entre 1 e 50 seções.");
+  const validTypes = new Set(["text","email","number","textarea","single","quiz","audioQuiz","frequency","scale"]), ids = new Set(), commonQuestionsById = new Map(); let total = 0;
+  bank.forEach(section => {
+    if (!section || typeof section.id !== "string" || !section.id.trim() || typeof section.title !== "string" || !section.title.trim()) throw new Error("Há uma seção sem identificação ou título.");
+    const lists = section.dynamicInstrument ? Object.values(section.questionsByInstrument || {}) : [section.questions];
+    if (!lists.length || lists.some(list => !Array.isArray(list))) throw new Error(`A seção ${section.title} possui uma lista de perguntas inválida.`);
+    lists.flat().forEach(item => {
+      total++;
+      if (!item || typeof item.id !== "string" || !item.id.trim() || ids.has(item.id)) throw new Error("Há perguntas sem identificação ou com identificações repetidas.");
+      ids.add(item.id); if (!section.dynamicInstrument) commonQuestionsById.set(item.id, item);
+      if (typeof item.text !== "string" || !item.text.trim() || item.text.length > 1000 || !validTypes.has(item.type)) throw new Error(`A pergunta ${item.id} possui texto ou formato inválido.`);
+      if (["single","quiz","audioQuiz","frequency"].includes(item.type) && (!Array.isArray(item.options) || item.options.length < 2 || item.options.length > 20)) throw new Error(`A pergunta ${item.id} precisa ter entre 2 e 20 opções.`);
+      if (requireAnswerKey && ["quiz","audioQuiz"].includes(item.type) && (!Number.isInteger(item.correct) || item.correct < 0 || item.correct >= item.options.length || item.options[item.correct] === "Não sei")) throw new Error(`Defina uma resposta correta válida para a pergunta ${item.id}.`);
+      if (item.type === "scale" && (!Array.isArray(item.scale) || !item.scale.length)) throw new Error(`A escala da pergunta ${item.id} é inválida.`);
+    });
+  });
+  if (!total || total > 600) throw new Error("O banco precisa ter entre 1 e 600 perguntas.");
+  const requiredSystemFields = { nome:"text", email:"email", instrumento:"single" };
+  Object.entries(requiredSystemFields).forEach(([id, type]) => {
+    const field = commonQuestionsById.get(id);
+    if (!field || field.type !== type || field.required === false) throw new Error(`O campo obrigatório ${id} precisa permanecer no formato ${type}.`);
+  });
+  const instruments = commonQuestionsById.get("instrumento")?.options || [], requiredInstruments = ["Bateria","Baixo","Violão","Guitarra","Teclado","Vocal"];
+  if (instruments.length !== requiredInstruments.length || !requiredInstruments.every(name => instruments.includes(name))) throw new Error("O campo instrumento precisa manter exatamente as seis funções musicais.");
+  return true;
 }
-function persistQuestionBank() { localStorage.setItem(QUESTION_BANK_KEY, JSON.stringify(sections)); }
+function sanitizeQuestionBankForStudent(bank) {
+  return JSON.parse(JSON.stringify(bank, (key, value) => ["correct", "explanation"].includes(key) ? undefined : value));
+}
+function loadQuestionBank() {
+  if (window.BANDA5_PRODUCTION_BUILD) { localStorage.removeItem(QUESTION_BANK_KEY); return; }
+  try { const saved = JSON.parse(localStorage.getItem(QUESTION_BANK_KEY)); if (Array.isArray(saved)) { validateQuestionBank(saved); sections = saved; } } catch (error) { console.warn("Banco de perguntas inválido", error); }
+}
+function persistQuestionBank() {
+  if (window.BandDB?.configured) {
+    cloudBankDirty = true;
+    localStorage.setItem(CLOUD_DRAFT_KEY, JSON.stringify({ sections, baseRevision:cloudBaseRevision, baseUpdatedAt:cloudBaseUpdatedAt, pendingAudioDeletes, stagedAudioUploads, savedAt:new Date().toISOString() }));
+    const button = $("saveCloudBtn");
+    if (button) { button.textContent = "Salvar e publicar •"; button.classList.add("has-changes"); }
+  } else localStorage.setItem(QUESTION_BANK_KEY, JSON.stringify(sections));
+}
 function editorNotice(message, error = false) { const box = $("editorNotice"); box.textContent = message; box.className = `editor-notice${error ? " error" : ""}`; setTimeout(() => box.classList.add("hidden"), 3500); }
 function openEditor() {
   welcomeScreen.classList.add("hidden"); quizScreen.classList.add("hidden"); resultScreen.classList.add("hidden"); editorScreen.classList.remove("hidden");
   $("editorSection").innerHTML = sections.map((section, index) => `<option value="${index}">${escapeHTML(section.title)}</option>`).join("");
-  $("editorInstrument").innerHTML = ["Bateria","Baixo","Violão","Guitarra","Teclado","Vocal"].map(name => `<option>${name}</option>`).join(""); renderEditor(); scrollToTop();
+  $("editorInstrument").innerHTML = ["Bateria","Baixo","Violão","Guitarra","Teclado","Vocal"].map(name => `<option>${name}</option>`).join("");
+  const cloudMode = Boolean(window.BandDB?.configured);
+  document.querySelectorAll(".admin-view-tab").forEach(element => element.classList.toggle("hidden", !cloudMode));
+  $("saveCloudBtn").classList.toggle("hidden", !cloudMode);
+  $("cloudLogoutBtn").classList.toggle("hidden", !cloudMode);
+  $("changePasswordBtn").classList.remove("hidden");
+  updateCloudSaveButton(); showQuestionsPanel(); scrollToTop();
 }
-function closeEditor() { editorAuthorized = false; editorScreen.classList.add("hidden"); welcomeScreen.classList.remove("hidden"); scrollToTop(); }
+async function openCloudEditor() {
+  if (cloudBankDirty && !editorScreen.classList.contains("hidden")) return openEditor();
+  const remote = await BandDB.loadAdminQuestionBank();
+  cloudBaseRevision = remote.revision; cloudBaseUpdatedAt = remote.updatedAt;
+  if (remote.sections?.length) {
+    validateQuestionBank(remote.sections);
+    adminPublishedSections = JSON.parse(JSON.stringify(remote.sections));
+    publishedSections = sanitizeQuestionBankForStudent(remote.sections);
+  } else {
+    adminPublishedSections = JSON.parse(JSON.stringify(DEFAULT_SECTIONS));
+    publishedSections = null;
+  }
+  sections = JSON.parse(JSON.stringify(adminPublishedSections)); pendingAudioDeletes = []; stagedAudioUploads = []; cloudBankDirty = !remote.sections?.length;
+  await retryOrphanAudioCleanup();
+  let draft = null;
+  try { draft = JSON.parse(localStorage.getItem(CLOUD_DRAFT_KEY)); } catch (_) { localStorage.removeItem(CLOUD_DRAFT_KEY); }
+  if (draft?.sections?.length) {
+    const changedOnline = Boolean(cloudBaseRevision && draft.baseRevision !== cloudBaseRevision);
+    const choice = await showAdminDialog({ title:"Rascunho encontrado", message:changedOnline ? "Este rascunho foi criado sobre uma versão anterior. Você pode usar a versão online ou abrir o rascunho para revisar; uma substituição exigirá confirmação adicional." : "Há alterações não publicadas salvas neste computador.", primary:changedOnline ? "Usar versão online" : "Recuperar rascunho", secondary:changedOnline ? "Revisar rascunho" : "Descartar rascunho", input:false });
+    if (choice.action === "cancel") {
+      try { await BandDB.signOut(); }
+      catch (error) { await showAdminDialog({ title:"Sessão ainda aberta", message:"Não foi possível encerrar o acesso administrativo. Verifique sua internet e tente novamente.", primary:"Entendi", input:false, error:"O logout não foi concluído." }); }
+      editorAuthorized = false; return;
+    }
+    const recoverDraft = changedOnline ? choice.action === "secondary" : choice.action === "primary";
+    if (recoverDraft) {
+      validateQuestionBank(draft.sections); sections = draft.sections; pendingAudioDeletes = Array.isArray(draft.pendingAudioDeletes) ? draft.pendingAudioDeletes : []; stagedAudioUploads = Array.isArray(draft.stagedAudioUploads) ? draft.stagedAudioUploads : []; cloudBankDirty = true;
+      if (changedOnline) { cloudBaseRevision = draft.baseRevision || null; cloudBaseUpdatedAt = draft.baseUpdatedAt || null; }
+    } else { await discardCloudDraft(draft); sections = JSON.parse(JSON.stringify(adminPublishedSections)); pendingAudioDeletes = []; stagedAudioUploads = []; cloudBankDirty = !remote.sections?.length; }
+  }
+  openEditor();
+}
+
+async function discardCloudDraft(draft) {
+  const unusedUploads = Array.isArray(draft?.stagedAudioUploads) ? draft.stagedAudioUploads : [];
+  localStorage.removeItem(CLOUD_DRAFT_KEY);
+  if (unusedUploads.length) await cleanupUnusedAudio(unusedUploads);
+}
+
+async function cleanupUnusedAudio(paths) {
+  const uniquePaths = [...new Set(paths.filter(Boolean))];
+  if (!uniquePaths.length || !window.BandDB?.configured) return [];
+  let previousQueue = [];
+  try { previousQueue = JSON.parse(localStorage.getItem(AUDIO_CLEANUP_KEY)) || []; }
+  catch (_) { localStorage.removeItem(AUDIO_CLEANUP_KEY); }
+  const results = await Promise.allSettled(uniquePaths.map(path => BandDB.deleteAudio(path)));
+  const failed = uniquePaths.filter((_, index) => results[index].status === "rejected");
+  const attempted = new Set(uniquePaths);
+  const remaining = Array.isArray(previousQueue) ? previousQueue.filter(path => !attempted.has(path)) : [];
+  const queued = [...new Set([...remaining, ...failed])];
+  if (queued.length) localStorage.setItem(AUDIO_CLEANUP_KEY, JSON.stringify(queued));
+  else localStorage.removeItem(AUDIO_CLEANUP_KEY);
+  return failed;
+}
+
+async function retryOrphanAudioCleanup() {
+  let queued = [];
+  try { queued = JSON.parse(localStorage.getItem(AUDIO_CLEANUP_KEY)) || []; } catch (_) { localStorage.removeItem(AUDIO_CLEANUP_KEY); }
+  if (Array.isArray(queued) && queued.length) await cleanupUnusedAudio(queued);
+}
+async function closeEditor() {
+  if (window.BandDB?.configured) {
+    try { await BandDB.signOut(); }
+    catch (error) {
+      console.warn("Não foi possível encerrar a sessão remota", error);
+      await showAdminDialog({ title:"Não foi possível bloquear o painel", message:"A sessão administrativa continua aberta. Verifique sua internet e tente novamente antes de deixar este computador.", primary:"Voltar ao painel", input:false, error:"O logout não foi concluído." });
+      return false;
+    }
+    sections = JSON.parse(JSON.stringify(publishedSections || DEFAULT_SECTIONS));
+  }
+  editorAuthorized = false; editorScreen.classList.add("hidden"); welcomeScreen.classList.remove("hidden"); scrollToTop();
+  return true;
+}
+
+function updateCloudSaveButton() {
+  const button = $("saveCloudBtn");
+  if (!button) return;
+  button.textContent = cloudBankDirty ? "Salvar e publicar •" : "Perguntas publicadas";
+  button.classList.toggle("has-changes", cloudBankDirty);
+}
+
+function setQuestionControlsVisible(visible) {
+  document.querySelectorAll(".question-admin-control").forEach(element => {
+    if (element.id === "editorInstrumentWrap") return;
+    const cloudOnlyHidden = element.id === "saveCloudBtn" && !window.BandDB?.configured;
+    element.classList.toggle("hidden", !visible || cloudOnlyHidden);
+  });
+  if (visible) getEditorContext();
+  else $("editorInstrumentWrap").classList.add("hidden");
+}
+
+function showQuestionsPanel() {
+  $("editorList").classList.remove("hidden"); $("responsesPanel").classList.add("hidden");
+  setQuestionControlsVisible(true);
+  $("editorPanelTitle").textContent = "Editor de perguntas";
+  $("editorPanelDescription").innerHTML = "Edite o banco do teste e carregue gravações reais para os exercícios de percepção. A tecla <strong>Return</strong> pode ser usada normalmente durante a edição.";
+  $("showQuestionsBtn").classList.add("is-active"); $("showResponsesBtn").classList.remove("is-active");
+  renderEditor();
+}
+
+async function showResponsesPanel() {
+  if (!window.BandDB?.configured) return editorNotice("Configure o banco online para receber respostas.", true);
+  $("editorList").classList.add("hidden"); $("responsesPanel").classList.remove("hidden");
+  setQuestionControlsVisible(false);
+  $("editorPanelTitle").textContent = "Painel de respostas";
+  $("editorPanelDescription").textContent = "Acompanhe os diagnósticos enviados, filtre participantes e marque os resultados já revisados.";
+  $("showQuestionsBtn").classList.remove("is-active"); $("showResponsesBtn").classList.add("is-active");
+  await loadCloudResponses();
+}
+
+async function saveQuestionBankToCloud() {
+  if (!window.BandDB?.configured) return;
+  try { validateQuestionBank(sections); } catch (error) { return editorNotice(error.message, true); }
+  persistQuestionBank();
+  const localAudios = getEveryQuestion().filter(item => item.audio?.kind === "uploaded");
+  if (localAudios.length) return editorNotice(`${localAudios.length} áudio(s) ainda estão apenas neste computador. Recarregue esses arquivos antes de publicar.`, true);
+  const button = $("saveCloudBtn"), previous = button.textContent;
+  button.disabled = true; button.textContent = "Publicando...";
+  try {
+    const saved = await BandDB.saveQuestionBank(sections, cloudBaseRevision);
+    await finishQuestionBankPublication(saved);
+  } catch (error) {
+    console.error("Falha ao publicar perguntas", error);
+    if (String(error?.message || "").includes("CONFLITO_DE_VERSAO")) {
+      const resolution = await showAdminDialog({ title:"O banco online mudou", message:"Para evitar apagar alterações feitas em outro navegador, a publicação foi bloqueada. Exporte seu rascunho antes de substituir se quiser guardar uma cópia.", primary:"Substituir versão online", secondary:"Continuar editando", input:false, error:"Confirme somente se este rascunho deve ser a nova versão oficial." });
+      if (resolution.action === "primary") {
+        try {
+          const latest = await BandDB.loadAdminQuestionBank();
+          const latestPaths = collectAudioReferences(latest.sections).remote, draftPaths = collectAudioReferences(sections).remote;
+          pendingAudioDeletes = [...new Set([...pendingAudioDeletes, ...[...latestPaths].filter(path => !draftPaths.has(path))])];
+          const saved = await BandDB.saveQuestionBank(sections, latest.revision);
+          await finishQuestionBankPublication(saved);
+        } catch (retryError) { console.error("Falha ao substituir versão online", retryError); button.textContent = previous; editorNotice(retryError.message || "Não foi possível substituir a versão online.", true); }
+      } else { button.textContent = previous; editorNotice("Rascunho mantido sem alterar a versão online."); }
+    } else { button.textContent = previous; editorNotice(error.message || "Não foi possível publicar as perguntas.", true); }
+  }
+  finally { button.disabled = false; }
+}
+
+async function finishQuestionBankPublication(saved) {
+  cloudBaseRevision = saved.revision; cloudBaseUpdatedAt = saved.updatedAt; adminPublishedSections = JSON.parse(JSON.stringify(sections)); publishedSections = sanitizeQuestionBankForStudent(sections); cloudBankDirty = false; cloudAssessmentPublished = true; localStorage.removeItem(CLOUD_DRAFT_KEY); updateCloudSaveButton(); $("startBtn").disabled = false;
+  const retainedAudioCount = new Set(pendingAudioDeletes).size; pendingAudioDeletes = []; stagedAudioUploads = [];
+  $("cloudStatus").textContent = "Banco online"; $("cloudStatus").className = "pill cloud-pill is-online";
+  editorNotice(retainedAudioCount ? "Perguntas publicadas. Os áudios anteriores foram preservados para avaliações já iniciadas." : "Perguntas e áudios publicados para os alunos.");
+}
+
+async function cloudAdminLogout() {
+  if (await closeEditor()) $("cloudStatus").textContent = "Banco online";
+}
+
+function getEveryQuestion() {
+  return sections.flatMap(section => section.dynamicInstrument ? Object.values(section.questionsByInstrument || {}).flat() : (section.questions || []));
+}
+function getQuestionsFromBank(bank) {
+  return (bank || []).flatMap(section => section.dynamicInstrument ? Object.values(section.questionsByInstrument || {}).flat() : (section.questions || []));
+}
+function collectAudioReferences(bank) {
+  return getQuestionsFromBank(bank).reduce((references, item) => {
+    if (item.audio?.storagePath) references.remote.add(item.audio.storagePath);
+    if (item.audio?.audioId) references.local.add(item.audio.audioId);
+    return references;
+  }, { remote:new Set(), local:new Set() });
+}
+async function trackRemovedBankAudio(previousBank, nextBank) {
+  const previous = collectAudioReferences(previousBank), next = collectAudioReferences(nextBank);
+  const removedRemote = [...previous.remote].filter(path => !next.remote.has(path));
+  if (window.BandDB?.configured) {
+    const staged = new Set(stagedAudioUploads);
+    const removedStaged = removedRemote.filter(path => staged.has(path));
+    stagedAudioUploads = stagedAudioUploads.filter(path => !removedStaged.includes(path));
+    if (removedStaged.length) await cleanupUnusedAudio(removedStaged);
+    pendingAudioDeletes = [...new Set([...pendingAudioDeletes, ...removedRemote.filter(path => !staged.has(path))])];
+  }
+  const removedLocal = [...previous.local].filter(id => !next.local.has(id));
+  if (!window.BandDB?.configured && removedLocal.length) await Promise.all(removedLocal.map(deleteAudioFile));
+}
 function getEditorContext() {
   const section = sections[Number($("editorSection").value) || 0];
   $("editorInstrumentWrap").classList.toggle("hidden", !section.dynamicInstrument);
@@ -277,17 +576,17 @@ function renderEditor() {
   const { list } = getEditorContext(); const host = $("editorList"); host.innerHTML = "";
   if (!list.length) host.innerHTML = '<div class="panel editor-empty">Nenhuma pergunta nesta seção para o instrumento selecionado.</div>';
   list.forEach((item, index) => {
-    const objective = ["quiz","audioQuiz"].includes(item.type); const card = document.createElement("article"); card.className = "panel editor-card";
+    const objective = ["quiz","audioQuiz"].includes(item.type), systemField = ["nome","email","instrumento"].includes(item.id); const card = document.createElement("article"); card.className = "panel editor-card";
     const editableTypes = [{value:"text",label:"Resposta curta"},{value:"email",label:"E-mail"},{value:"number",label:"Número"},{value:"textarea",label:"Resposta longa"},{value:"single",label:"Seleção fixa do sistema",disabled:true},{value:"quiz",label:"Múltipla escolha"},{value:"audioQuiz",label:"Áudio + múltipla escolha"},{value:"frequency",label:"Escala de frequência"},{value:"scale",label:"Autoavaliação 0 a 4"}];
-    card.innerHTML = `<div class="editor-card-top"><span class="editor-index">${String(index + 1).padStart(2,"0")}</span><label class="editor-type-select">Formato<select class="field">${editableTypes.map(type => `<option value="${type.value}" ${item.type === type.value ? "selected" : ""} ${type.disabled ? "disabled" : ""}>${type.label}</option>`).join("")}</select></label><div class="editor-order"><button type="button" class="btn btn-ghost editor-move-up" ${index === 0 ? "disabled" : ""} aria-label="Mover pergunta para cima">↑ Subir</button><button type="button" class="btn btn-ghost editor-move-down" ${index === list.length - 1 ? "disabled" : ""} aria-label="Mover pergunta para baixo">↓ Descer</button></div><button type="button" class="btn btn-danger editor-delete">Excluir</button></div>
+    card.innerHTML = `<div class="editor-card-top"><span class="editor-index">${String(index + 1).padStart(2,"0")}</span><label class="editor-type-select">Formato<select class="field" ${systemField ? "disabled title=\"Campo necessário para identificar o participante\"" : ""}>${editableTypes.map(type => `<option value="${type.value}" ${item.type === type.value ? "selected" : ""} ${type.disabled ? "disabled" : ""}>${type.label}</option>`).join("")}</select></label><div class="editor-order"><button type="button" class="btn btn-ghost editor-move-up" ${index === 0 ? "disabled" : ""} aria-label="Mover pergunta para cima">↑ Subir</button><button type="button" class="btn btn-ghost editor-move-down" ${index === list.length - 1 ? "disabled" : ""} aria-label="Mover pergunta para baixo">↓ Descer</button></div><button type="button" class="btn btn-danger editor-delete" ${systemField ? "disabled title=\"Campo obrigatório do sistema\"" : ""}>${systemField ? "Obrigatória" : "Excluir"}</button></div>
       <label>Enunciado<textarea class="textarea editor-question">${escapeHTML(item.text || "")}</textarea></label>
       ${objective ? `<div class="editor-options"><strong>Alternativas e resposta correta</strong>${(item.options || []).map((option, optionIndex) => `<div class="editor-option"><input type="radio" name="correct_${item.id}" value="${optionIndex}" ${item.correct === optionIndex ? "checked" : ""} ${option === "Não sei" ? "disabled" : ""} title="Marque a resposta correta"><input class="field editor-option-text" data-option="${optionIndex}" value="${escapeHTML(option)}"><button class="editor-remove-option" data-option="${optionIndex}" type="button" ${option === "Não sei" ? "disabled" : ""}>×</button></div>`).join("")}<button class="btn btn-secondary editor-add-option" type="button">+ Alternativa</button></div>` : '<p class="editor-fixed-note">Este formato não possui gabarito de alternativas.</p>'}
-      <div class="editor-audio"><div><strong>Áudio real do instrumento</strong><small>${item.audio?.uploadedName ? `Arquivo atual: ${escapeHTML(item.audio.uploadedName)}` : "Opcional - MP3, WAV, M4A, OGG ou outro formato aceito pelo navegador."}</small></div><label class="btn btn-secondary file-button">Carregar áudio<input class="editor-audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac"></label>${item.audio?.kind === "uploaded" ? '<button class="btn btn-ghost editor-remove-audio" type="button">Remover áudio</button>' : ""}</div>`;
+      <div class="editor-audio"><div class="editor-audio-copy"><strong>Áudio real do instrumento</strong><small>${item.audio?.uploadedName ? `Arquivo atual: ${escapeHTML(item.audio.uploadedName)}` : "Opcional — MP3, WAV, M4A, OGG ou outro formato aceito pelo navegador."}</small>${item.audio?.uploadedName ? `<span class="audio-storage-badge">${item.audio.kind === "uploadedRemote" ? "Publicado online" : "Salvo neste computador"}</span>` : ""}</div><div class="editor-audio-actions"><label class="btn btn-secondary file-button">${item.audio?.uploadedName ? "Substituir áudio" : "Carregar áudio"}<input class="editor-audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac"></label>${["uploaded","uploadedRemote"].includes(item.audio?.kind) ? '<button class="btn btn-ghost editor-remove-audio" type="button">Remover áudio</button>' : ""}</div></div>`;
     card.querySelector(".editor-question").addEventListener("input", event => { item.text = event.target.value; persistQuestionBank(); });
     card.querySelector(".editor-type-select select").addEventListener("change", event => { changeQuestionType(item, event.target.value); persistQuestionBank(); renderEditor(); editorNotice("Formato da pergunta alterado."); });
     card.querySelector(".editor-move-up").addEventListener("click", () => moveEditorQuestion(list, index, -1));
     card.querySelector(".editor-move-down").addEventListener("click", () => moveEditorQuestion(list, index, 1));
-    card.querySelector(".editor-delete").addEventListener("click", async () => { if (!confirm("Excluir esta pergunta?")) return; if (item.audio?.audioId) await deleteAudioFile(item.audio.audioId); list.splice(index, 1); persistQuestionBank(); renderEditor(); });
+    card.querySelector(".editor-delete").addEventListener("click", async () => { if (!confirm("Excluir esta pergunta?")) return; await removeQuestionAudio(item, false); list.splice(index, 1); persistQuestionBank(); renderEditor(); });
     if (objective) {
       card.querySelectorAll('input[type="radio"]').forEach(input => input.addEventListener("change", event => { item.correct = Number(event.target.value); persistQuestionBank(); }));
       card.querySelectorAll(".editor-option-text").forEach(input => input.addEventListener("input", event => { item.options[Number(event.target.dataset.option)] = event.target.value; persistQuestionBank(); }));
@@ -295,7 +594,7 @@ function renderEditor() {
       card.querySelector(".editor-add-option").addEventListener("click", () => { const unknown = item.options.lastIndexOf("Não sei"); item.options.splice(unknown < 0 ? item.options.length : unknown, 0, "Nova alternativa"); persistQuestionBank(); renderEditor(); });
     }
     card.querySelector(".editor-audio-file").addEventListener("change", event => uploadEditorAudio(event.target.files[0], item));
-    card.querySelector(".editor-remove-audio")?.addEventListener("click", async () => { await deleteAudioFile(item.audio.audioId); if (item.type === "audioQuiz") item.type = "quiz"; delete item.audio; persistQuestionBank(); renderEditor(); editorNotice("Áudio removido."); });
+    card.querySelector(".editor-remove-audio")?.addEventListener("click", async () => { if (!confirm("Remover o áudio desta pergunta?")) return; await removeQuestionAudio(item); });
     host.appendChild(card);
   });
 }
@@ -314,19 +613,140 @@ function changeQuestionType(item, type) {
 }
 function addEditorQuestion() {
   const { list } = getEditorContext();
-  list.unshift({ id:`custom_${Date.now()}`, type:"text", text:"Nova pergunta", required:true, placeholder:"Digite sua resposta" });
+  list.unshift({ id:`custom_${createSubmissionId()}`, type:"text", text:"Nova pergunta", required:true, placeholder:"Digite sua resposta" });
   persistQuestionBank(); renderEditor(); editorNotice("Nova pergunta criada. Escolha o formato e edite o enunciado.");
   const newCard = $("editorList").querySelector(".editor-card"); newCard?.classList.add("editor-card-new");
   newCard?.scrollIntoView({ behavior:"smooth", block:"center" }); setTimeout(() => newCard?.querySelector(".editor-question")?.focus(), 350);
 }
-async function uploadEditorAudio(file, item) { if (!file) return; if (!file.type.startsWith("audio/") && !/\.(mp3|wav|m4a|ogg|aac)$/i.test(file.name)) return editorNotice("Selecione um arquivo de áudio válido.", true); const audioId = item.audio?.audioId || `audio_${item.id}_${Date.now()}`; await saveAudioFile(audioId, file); if (["quiz","audioQuiz"].includes(item.type)) item.type = "audioQuiz"; item.audio = { kind:"uploaded", audioId, uploadedName:file.name, mimeType:file.type }; persistQuestionBank(); renderEditor(); editorNotice(`Áudio ${file.name} carregado com sucesso.`); }
+async function uploadEditorAudio(file, item) {
+  if (!file) return;
+  if (!file.type.startsWith("audio/") && !/\.(mp3|wav|m4a|ogg|aac)$/i.test(file.name)) return editorNotice("Selecione um arquivo de áudio válido.", true);
+  if (file.size > 20 * 1024 * 1024) return editorNotice("O arquivo deve ter no máximo 20 MB.", true);
+  const previousAudio = item.audio;
+  try {
+    editorNotice("Carregando áudio...");
+    if (window.BandDB?.configured) {
+      const uploaded = await BandDB.uploadAudio(file, item.id);
+      item.audio = uploaded;
+      stagedAudioUploads.push(uploaded.storagePath);
+      if (previousAudio?.storagePath) {
+        if (stagedAudioUploads.includes(previousAudio.storagePath)) { stagedAudioUploads = stagedAudioUploads.filter(path => path !== previousAudio.storagePath); await cleanupUnusedAudio([previousAudio.storagePath]); }
+        else pendingAudioDeletes.push(previousAudio.storagePath);
+      }
+      if (previousAudio?.audioId) await deleteAudioFile(previousAudio.audioId);
+    } else {
+      const audioId = previousAudio?.audioId || `audio_${item.id}_${Date.now()}`;
+      await saveAudioFile(audioId, file);
+      item.audio = { kind:"uploaded", audioId, uploadedName:file.name, mimeType:file.type };
+    }
+    if (["quiz","audioQuiz"].includes(item.type)) item.type = "audioQuiz";
+    persistQuestionBank(); renderEditor(); editorNotice(`Áudio ${file.name} carregado com sucesso.`);
+  } catch (error) { console.error("Falha ao carregar áudio", error); item.audio = previousAudio; editorNotice(error.message || "Não foi possível carregar o áudio.", true); }
+}
+
+async function removeQuestionAudio(item, rerender = true) {
+  const audio = item.audio;
+  if (!audio) return;
+  try {
+    if (audio.storagePath && window.BandDB?.configured) {
+      if (stagedAudioUploads.includes(audio.storagePath)) { stagedAudioUploads = stagedAudioUploads.filter(path => path !== audio.storagePath); await cleanupUnusedAudio([audio.storagePath]); }
+      else pendingAudioDeletes.push(audio.storagePath);
+    }
+    if (audio.audioId) await deleteAudioFile(audio.audioId);
+    if (item.type === "audioQuiz") item.type = "quiz";
+    delete item.audio; persistQuestionBank();
+    if (rerender) { renderEditor(); editorNotice("Áudio removido."); }
+  } catch (error) { console.error("Falha ao remover áudio", error); editorNotice(error.message || "Não foi possível remover o áudio.", true); }
+}
 function exportQuestionBank() { downloadBlob(JSON.stringify({ version:1, sections }, null, 2), "banda5_banco_perguntas.json", "application/json;charset=utf-8"); editorNotice("Banco exportado. Os arquivos de áudio permanecem neste navegador."); }
-async function importQuestionBank(event) { const file = event.target.files[0]; if (!file) return; try { const data = JSON.parse(await file.text()); const imported = Array.isArray(data) ? data : data.sections; if (!Array.isArray(imported)) throw new Error(); sections = imported; persistQuestionBank(); openEditor(); editorNotice("Banco de perguntas importado."); } catch (_) { editorNotice("Arquivo de banco inválido.", true); } event.target.value = ""; }
-function resetQuestionBank() { if (!confirm("Restaurar todas as perguntas originais? Os áudios carregados deixarão de ser vinculados.")) return; sections = JSON.parse(JSON.stringify(DEFAULT_SECTIONS)); persistQuestionBank(); openEditor(); editorNotice("Banco original restaurado."); }
+async function importQuestionBank(event) { const file = event.target.files[0]; if (!file) return; try { const data = JSON.parse(await file.text()); const imported = Array.isArray(data) ? data : data.sections; validateQuestionBank(imported); await trackRemovedBankAudio(sections, imported); sections = imported; persistQuestionBank(); openEditor(); editorNotice("Banco de perguntas importado. Revise e publique quando estiver pronto."); } catch (error) { editorNotice(error.message || "Arquivo de banco inválido.", true); } event.target.value = ""; }
+async function resetQuestionBank() { if (!confirm("Restaurar todas as perguntas originais? Os áudios carregados deixarão de ser vinculados.")) return; const original = JSON.parse(JSON.stringify(DEFAULT_SECTIONS)); await trackRemovedBankAudio(sections, original); sections = original; persistQuestionBank(); openEditor(); editorNotice("Banco original restaurado."); }
 function openAudioDB() { return new Promise((resolve, reject) => { const request = indexedDB.open(AUDIO_DB_NAME, 1); request.onupgradeneeded = () => request.result.createObjectStore("audio"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
 async function saveAudioFile(id, blob) { const db = await openAudioDB(); return new Promise((resolve, reject) => { const tx = db.transaction("audio", "readwrite"); tx.objectStore("audio").put(blob, id); tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); }); }
 async function getAudioFile(id) { const db = await openAudioDB(); return new Promise((resolve, reject) => { const request = db.transaction("audio").objectStore("audio").get(id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
 async function deleteAudioFile(id) { if (!id) return; const db = await openAudioDB(); return new Promise(resolve => { const tx = db.transaction("audio", "readwrite"); tx.objectStore("audio").delete(id); tx.oncomplete = resolve; }); }
+
+async function loadCloudResponses() {
+  if (!window.BandDB?.configured) return;
+  const button = $("refreshResponsesBtn");
+  button.disabled = true; button.textContent = "Atualizando...";
+  $("responsesList").innerHTML = '<div class="panel responses-state">Buscando respostas no banco...</div>';
+  try { cloudSubmissions = await BandDB.listSubmissions(); renderCloudResponses(); }
+  catch (error) { console.error("Falha ao carregar respostas", error); $("responsesSummary").textContent = "Não foi possível carregar os resultados."; $("responsesList").innerHTML = `<div class="panel responses-state error">${escapeHTML(error.message || "Verifique sua conexão e tente novamente.")}</div>`; }
+  finally { button.disabled = false; button.textContent = "Atualizar"; }
+}
+
+function normalizeSearch(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function statusLabel(status) {
+  return ({ new:"Novo", reviewed:"Revisado", archived:"Arquivado" })[status] || "Novo";
+}
+
+function formatSubmissionDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Data não informada" : date.toLocaleString("pt-BR", { dateStyle:"short", timeStyle:"short" });
+}
+
+function findQuestionById(id) {
+  return getEveryQuestion().find(question => question.id === id);
+}
+
+function formatStoredAnswer(id, value) {
+  const question = findQuestionById(id);
+  if (!question) return String(value ?? "");
+  if (["quiz", "audioQuiz"].includes(question.type)) return question.options?.[Number(value)] ?? String(value ?? "");
+  if (question.type === "frequency") return question.options?.find(option => Number(option.value) === Number(value))?.label ?? String(value ?? "");
+  if (question.type === "scale") return question.scale?.find(option => Number(option.value) === Number(value))?.label ?? String(value ?? "");
+  return String(value ?? "");
+}
+
+function renderCloudResponses() {
+  const host = $("responsesList"), query = normalizeSearch($("responsesSearch").value);
+  const filtered = cloudSubmissions.filter(item => normalizeSearch([item.participant_name, item.participant_email, item.instrument, item.status].join(" ")).includes(query));
+  const pending = cloudSubmissions.filter(item => item.status === "new").length;
+  const reviewed = cloudSubmissions.filter(item => item.status === "reviewed").length;
+  $("responsesSummary").textContent = `${cloudSubmissions.length} envio(s) • ${pending} novo(s) • ${reviewed} revisado(s)`;
+  $("exportResponsesBtn").disabled = !cloudSubmissions.length;
+  if (!filtered.length) { host.innerHTML = `<div class="panel responses-state">${cloudSubmissions.length ? "Nenhum resultado corresponde à busca." : "Nenhuma resposta foi recebida ainda."}</div>`; return; }
+  host.innerHTML = "";
+  filtered.forEach(submission => {
+    const scores = submission.scores || {}, plan = submission.plan || {}, storedAnswers = submission.answers || {}, reviewItems = Array.isArray(submission.review_items) ? submission.review_items : [];
+    const snapshot = Array.isArray(submission.answer_snapshot) ? submission.answer_snapshot : [];
+    const answerRows = snapshot.length ? snapshot.map(item => `<div class="response-answer"><small>${escapeHTML(item.question || item.id)}</small><div>${escapeHTML(item.answer)}</div></div>`).join("") : Object.entries(storedAnswers).map(([id, value]) => {
+      const question = findQuestionById(id);
+      return `<div class="response-answer"><small>${escapeHTML(question?.text || id)}</small><div>${escapeHTML(formatStoredAnswer(id, value))}</div></div>`;
+    }).join("");
+    const card = document.createElement("article"); card.className = `panel response-card status-${submission.status || "new"}`;
+    const reviewRows = reviewItems.length ? `<div class="response-review-list"><h4>Pontos para revisar</h4>${reviewItems.map(item => `<div class="response-review-item"><small>${escapeHTML(item.area || "Conteúdo")}</small><strong>${escapeHTML(item.question || "Questão")}</strong><p>Marcou: ${escapeHTML(item.selected || "Não respondida")}<br>Esperada: ${escapeHTML(item.correct || "—")}</p><span>${escapeHTML(item.guidance || "Revisar este conteúdo em uma atividade prática.")}</span></div>`).join("")}</div>` : '<div class="response-review-empty">Nenhuma questão objetiva incorreta.</div>';
+    card.innerHTML = `<div class="response-card-head"><div><div class="response-title-row"><h3>${escapeHTML(submission.participant_name || "Participante")}</h3><span class="response-status">${statusLabel(submission.status)}</span></div><p>${escapeHTML(submission.participant_email || "Sem e-mail")} • ${escapeHTML(submission.instrument || "Função não informada")} • ${formatSubmissionDate(submission.created_at)}</p></div><div class="response-score"><strong>${Number(scores.geral ?? 0)}%</strong><span>Índice geral</span></div></div>
+      <div class="response-metrics"><span><strong>${Number(scores.demonstrado ?? 0)}%</strong> demonstrado</span><span><strong>${Number(scores.autoavaliacao ?? 0)}%</strong> execução percebida</span><span><strong>${reviewItems.length}</strong> para revisar</span></div>
+      <details class="response-details"><summary>Ver respostas e plano individual</summary><div class="response-plan"><div><small>Repertório</small><p>${escapeHTML(plan.repertorio || "Não informado")}</p></div><div><small>Dificuldade</small><p>${escapeHTML(plan.dificuldade || "Não informada")}</p></div><div><small>Meta de 90 dias</small><p>${escapeHTML(plan.meta_90_dias || "Não informada")}</p></div><div><small>Estudo semanal</small><p>${escapeHTML(plan.estudo_semanal || "Não informado")}</p></div></div>${reviewRows}<div class="response-answers">${answerRows}</div></details>
+      <div class="response-card-actions"><label>Status<select class="field response-status-select"><option value="new" ${submission.status === "new" ? "selected" : ""}>Novo</option><option value="reviewed" ${submission.status === "reviewed" ? "selected" : ""}>Revisado</option><option value="archived" ${submission.status === "archived" ? "selected" : ""}>Arquivado</option></select></label><button type="button" class="btn btn-danger response-delete">Excluir resultado</button></div>`;
+    card.querySelector(".response-status-select").addEventListener("change", async event => {
+      const select = event.target, previous = submission.status; select.disabled = true;
+      try { await BandDB.updateSubmissionStatus(submission.id, select.value); submission.status = select.value; renderCloudResponses(); }
+      catch (error) { select.value = previous; select.disabled = false; editorNotice(error.message || "Não foi possível alterar o status.", true); }
+    });
+    card.querySelector(".response-delete").addEventListener("click", async event => {
+      if (!confirm(`Excluir definitivamente o resultado de ${submission.participant_name || "este participante"}?`)) return;
+      event.currentTarget.disabled = true;
+      try { await BandDB.deleteSubmission(submission.id); cloudSubmissions = cloudSubmissions.filter(item => item.id !== submission.id); renderCloudResponses(); editorNotice("Resultado excluído."); }
+      catch (error) { event.currentTarget.disabled = false; editorNotice(error.message || "Não foi possível excluir o resultado.", true); }
+    });
+    host.appendChild(card);
+  });
+}
+
+function exportCloudResponses() {
+  if (!cloudSubmissions.length) return editorNotice("Ainda não há respostas para exportar.", true);
+  const scoreKeys = ["geral","demonstrado","autoavaliacao","teoria","harmonia","ritmo","percepcao","conjunto","tecnica_especifica","preparo"];
+  const header = ["Data","Nome","E-mail","Função","Status",...scoreKeys.map(key => labels[key]),"Repertório","Dificuldade","Meta 90 dias","Estudo semanal"];
+  const rows = cloudSubmissions.map(item => [formatSubmissionDate(item.created_at), item.participant_name, item.participant_email || "", item.instrument || "", statusLabel(item.status), ...scoreKeys.map(key => item.scores?.[key] == null ? "" : `${item.scores[key]}%`), item.plan?.repertorio || "", item.plan?.dificuldade || "", item.plan?.meta_90_dias || "", item.plan?.estudo_semanal || ""]);
+  const csv = "\uFEFF" + [header, ...rows].map(row => row.map(csvCell).join(";")).join("\n");
+  downloadBlob(csv, `banda5_respostas_${new Date().toISOString().slice(0,10)}.csv`, "text/csv;charset=utf-8");
+}
 
 function getAllVisibleQuestions() {
   const instrument = answers.instrumento || "Violão";
@@ -336,7 +756,12 @@ function getAllVisibleQuestions() {
   });
 }
 
-function startQuiz() { answers = {}; currentIndex = 0; localStorage.removeItem(STORAGE_KEY); visibleQuestions = getAllVisibleQuestions(); welcomeScreen.classList.add("hidden"); resultScreen.classList.add("hidden"); quizScreen.classList.remove("hidden"); renderQuestion(); }
+function startQuiz() {
+  answers = {}; currentIndex = 0; submittedProtocol = null; currentSubmissionId = createSubmissionId(); verifiedScores = null; verifiedReviewItems = null; localStorage.removeItem(STORAGE_KEY); visibleQuestions = getAllVisibleQuestions();
+  $("submissionStatus").classList.add("hidden"); $("submissionStatus").textContent = "";
+  $("submitResultBtn").disabled = false; $("submitResultBtn").textContent = "Enviar respostas ao avaliador";
+  welcomeScreen.classList.add("hidden"); resultScreen.classList.add("hidden"); quizScreen.classList.remove("hidden"); renderQuestion();
+}
 
 function getSectionSummary() {
   return visibleQuestions.reduce((summary, item, index) => {
@@ -379,7 +804,7 @@ function renderQuestion() {
   else if (["single", "quiz", "audioQuiz"].includes(item.type)) { card.appendChild(renderOptions(item, item.options, item.options.map((_, i) => i), item.type === "single")); }
   else if (["text", "email", "number"].includes(item.type)) { const input = document.createElement("input"); input.className = "field"; input.type = item.type; input.placeholder = item.placeholder || ""; input.value = answers[item.id] ?? ""; input.addEventListener("input", e => { answers[item.id] = e.target.value; saveState(); }); card.appendChild(input); setTimeout(() => input.focus(), 50); }
   else if (item.type === "textarea") { const input = document.createElement("textarea"); input.className = "textarea"; input.placeholder = item.placeholder || ""; input.value = answers[item.id] ?? ""; input.addEventListener("input", e => { answers[item.id] = e.target.value; saveState(); }); card.appendChild(input); }
-  questionContainer.appendChild(card); backBtn.disabled = currentIndex === 0; nextBtn.textContent = currentIndex === visibleQuestions.length - 1 ? "Ver diagnóstico" : "Continuar";
+  questionContainer.appendChild(card); backBtn.disabled = currentIndex === 0; nextBtn.textContent = currentIndex === visibleQuestions.length - 1 ? (window.BandDB?.configured ? "Enviar e ver diagnóstico" : "Ver diagnóstico") : "Continuar";
 }
 
 function renderAudio(item) {
@@ -399,6 +824,12 @@ async function playExercise(spec) {
     const url = URL.createObjectURL(blob), player = new Audio(url);
     return new Promise((resolve, reject) => { player.onended = () => { URL.revokeObjectURL(url); resolve(); }; player.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Formato de áudio não suportado")); }; player.play().catch(reject); });
   }
+  if (spec.kind === "uploadedRemote") {
+    if (!spec.url) throw new Error("Endereço do áudio não encontrado");
+    const player = new Audio(spec.url);
+    player.preload = "auto";
+    return new Promise((resolve, reject) => { player.onended = resolve; player.onerror = () => reject(new Error("Não foi possível carregar o áudio online")); player.play().catch(reject); });
+  }
   audioContext ||= new (window.AudioContext || window.webkitAudioContext)(); await audioContext.resume(); const start = audioContext.currentTime + .08;
   const tone = (freq, at, duration) => { const osc = audioContext.createOscillator(), gain = audioContext.createGain(); osc.type = "triangle"; osc.frequency.value = freq; gain.gain.setValueAtTime(0.0001, at); gain.gain.exponentialRampToValueAtTime(.11, at + .025); gain.gain.setValueAtTime(.09, at + duration - .08); gain.gain.exponentialRampToValueAtTime(.0001, at + duration); osc.connect(gain).connect(audioContext.destination); osc.start(at); osc.stop(at + duration + .02); };
   if (spec.kind === "chord") spec.notes.forEach(n => tone(n, start, 1.5));
@@ -413,11 +844,12 @@ function renderScale(item) { const row = document.createElement("div"); row.clas
 function renderOptions(item, labels, values, storeLabel = false) { const box = document.createElement("div"); box.className = "options"; labels.forEach((label, i) => { const option = document.createElement("label"); option.className = "option"; const input = document.createElement("input"); input.type = "radio"; input.name = item.id; const value = storeLabel ? label : values[i]; input.value = String(value); input.checked = String(answers[item.id]) === String(value); if (input.checked) option.classList.add("selected"); input.addEventListener("change", () => { answers[item.id] = value; box.querySelectorAll(".option").forEach(el => el.classList.remove("selected")); option.classList.add("selected"); if (item.id === "instrumento") { Object.keys(answers).filter(k => /^(bat|baixo|vio|gui|tec|voc)_/.test(k)).forEach(k => delete answers[k]); visibleQuestions = getAllVisibleQuestions(); } saveState(); }); const span = document.createElement("span"); span.textContent = label; option.append(input, span); box.appendChild(option); }); return box; }
 
 function isAnswered(item) { if (item.required === false) return true; const value = answers[item.id]; if (value === undefined || value === null || String(value).trim() === "") return false; if (item.type === "email") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value).trim()); return true; }
-function goNext() { const item = visibleQuestions[currentIndex]; if (!isAnswered(item)) { document.querySelector(".error-message")?.remove(); questionContainer.insertAdjacentHTML("beforeend", '<div class="error-message">Responda esta pergunta antes de continuar.</div>'); return; } if (currentIndex < visibleQuestions.length - 1) { currentIndex++; saveState(); renderQuestion(); scrollToTop(); } else showResults(); }
+async function goNext() { const item = visibleQuestions[currentIndex]; if (!isAnswered(item)) { document.querySelector(".error-message")?.remove(); questionContainer.insertAdjacentHTML("beforeend", '<div class="error-message">Responda esta pergunta antes de continuar.</div>'); return; } if (currentIndex < visibleQuestions.length - 1) { currentIndex++; saveState(); renderQuestion(); scrollToTop(); } else if (window.BandDB?.configured) await finishCloudDiagnosis(); else showResults(); }
 function goBack() { if (currentIndex > 0) { currentIndex--; saveState(); renderQuestion(); scrollToTop(); } }
 function scrollToTop() { window.scrollTo({ top: 0, behavior: "smooth" }); }
 
 function calculateScores() {
+  if (verifiedScores) return { ...verifiedScores };
   const buckets = { teoria: [], harmonia: [], ritmo: [], percepcao: [], conjunto: [], preparo: [], tecnica_especifica: [] };
   let objectiveTotal = 0, objectiveCorrect = 0, selfTotal = 0, selfPoints = 0;
   getAllVisibleQuestions().forEach(item => { if (!item.category || answers[item.id] === undefined) return; let score;
@@ -444,6 +876,7 @@ const guidanceByCategory = {
 };
 
 function getMistakes() {
+  if (verifiedReviewItems) return verifiedReviewItems.map(item => ({ ...item }));
   return getAllVisibleQuestions()
     .filter(item => ["quiz", "audioQuiz"].includes(item.type) && answers[item.id] !== undefined && Number(answers[item.id]) !== item.correct)
     .map(item => ({
@@ -467,18 +900,65 @@ function showResults() { quizScreen.classList.add("hidden"); welcomeScreen.class
   const mistakes = getMistakes(); $("mistakesList").innerHTML = "";
   if (!mistakes.length) $("mistakesList").innerHTML = '<div class="empty-success">Nenhuma questão objetiva incorreta. Mantenha a prática e confirme esse resultado em uma execução musical.</div>';
   mistakes.forEach((mistake, i) => { const el = document.createElement("div"); el.className = "mistake-item"; el.innerHTML = `<div class="mistake-top"><span class="mistake-area">${escapeHTML(mistake.area)}</span><span>${mistake.audio ? "Exercício de áudio" : `Questão ${i+1}`}</span></div><div class="mistake-question">${escapeHTML(mistake.question)}</div><div class="mistake-answer">Marcou: <strong>${escapeHTML(mistake.selected)}</strong><br>Resposta esperada: <strong>${escapeHTML(mistake.correct)}</strong></div><div class="mistake-guidance"><strong>Como ajudar:</strong> ${escapeHTML(mistake.guidance)}</div>`; $("mistakesList").appendChild(el); });
-  $("personalAnswers").innerHTML = ""; [["Função avaliada", answers.instrumento],["Papel vocal", answers.voc_papel],["Referência de repertório",answers.repertorio],["Dificuldade observada",answers.dificuldade],["Meta de 90 dias",answers.meta_90],["Tempo semanal",answers.estudo],["Observação",answers.observacao]].forEach(([label,value]) => { if (!value) return; const el = document.createElement("div"); el.className = "personal-answer"; el.innerHTML = `<small>${label}</small><div>${escapeHTML(String(value))}</div>`; $("personalAnswers").appendChild(el); }); saveState(true); scrollToTop(); }
+  $("personalAnswers").innerHTML = ""; [["E-mail", answers.email],["Função avaliada", answers.instrumento],["Papel vocal", answers.voc_papel],["Referência de repertório",answers.repertorio],["Dificuldade observada",answers.dificuldade],["Meta de 90 dias",answers.meta_90],["Tempo semanal",answers.estudo],["Observação",answers.observacao]].forEach(([label,value]) => { if (!value) return; const el = document.createElement("div"); el.className = "personal-answer"; el.innerHTML = `<small>${label}</small><div>${escapeHTML(String(value))}</div>`; $("personalAnswers").appendChild(el); });
+  $("submitResultBtn").classList.toggle("hidden", !window.BandDB?.configured);
+  saveState(true); scrollToTop(); }
 
-function escapeHTML(str) { return str.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c])); }
+function escapeHTML(str) { return String(str ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c])); }
 function saveState(completed=false) { localStorage.setItem(STORAGE_KEY, JSON.stringify({ answers, currentIndex, completed, savedAt:new Date().toISOString() })); }
-function restartQuiz() { if (!confirm("Deseja apagar as respostas e iniciar um novo diagnóstico?")) return; localStorage.removeItem(STORAGE_KEY); answers = {}; currentIndex = 0; resultScreen.classList.add("hidden"); welcomeScreen.classList.remove("hidden"); scrollToTop(); }
-function buildExportPayload() { return { versao:"2.1", participante:{ nome:answers.nome||"", idade:answers.idade||"", funcao:answers.instrumento||"", papel_vocal:answers.voc_papel||"", tempo:answers.tempo_musica||"", formacao:answers.aulas||"" }, pontuacoes:calculateScores(), respostas_para_revisar:getMistakes(), plano:{ repertorio:answers.repertorio||"", dificuldade:answers.dificuldade||"", meta_90_dias:answers.meta_90||"", estudo_semanal:answers.estudo||"" }, respostas:answers, gerado_em:new Date().toLocaleString("pt-BR") }; }
+function restartQuiz() { if (!confirm("Deseja apagar as respostas e iniciar um novo diagnóstico?")) return; localStorage.removeItem(STORAGE_KEY); answers = {}; currentIndex = 0; submittedProtocol = null; currentSubmissionId = null; verifiedScores = null; verifiedReviewItems = null; $("submissionStatus").classList.add("hidden"); resultScreen.classList.add("hidden"); welcomeScreen.classList.remove("hidden"); scrollToTop(); }
+function buildSubmissionPayload() { const normalizedAnswers = { ...answers, nome:String(answers.nome || "").trim(), email:String(answers.email || "").trim(), instrumento:String(answers.instrumento || "").trim() }; return { versao:"3.0", question_bank_revision:cloudBaseRevision, client_submission_id:currentSubmissionId || (currentSubmissionId = createSubmissionId()), participante:{ nome:normalizedAnswers.nome, email:normalizedAnswers.email, idade:answers.idade||"", funcao:normalizedAnswers.instrumento, papel_vocal:answers.voc_papel||"", tempo:answers.tempo_musica||"", formacao:answers.aulas||"" }, plano:{ repertorio:answers.repertorio||"", dificuldade:answers.dificuldade||"", meta_90_dias:answers.meta_90||"", estudo_semanal:answers.estudo||"", observacao:answers.observacao||"" }, respostas:normalizedAnswers }; }
+function buildExportPayload() { return { ...buildSubmissionPayload(), pontuacoes:calculateScores(), respostas_para_revisar:getMistakes(), gerado_em:new Date().toISOString() }; }
 function safeFilename(name) { return (name||"integrante").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-zA-Z0-9_-]+/g,"_").replace(/^_+|_+$/g,"").toLowerCase(); }
 function downloadBlob(content, filename, type) { const blob = new Blob([content],{type}), url=URL.createObjectURL(blob), a=document.createElement("a"); a.href=url; a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+function csvCell(value) { let safe = String(value ?? ""); if (/^[=+\-@]/.test(safe)) safe = `'${safe}`; return `"${safe.replaceAll('"','""')}"`; }
 function downloadJSON() { downloadBlob(JSON.stringify(buildExportPayload(),null,2),`banda5_${safeFilename(answers.nome)}.json`,"application/json;charset=utf-8"); }
-function downloadCSV() { const p=buildExportPayload(), rows=[["Campo","Valor"],["Nome",p.participante.nome],["Função",p.participante.funcao],["Papel vocal",p.participante.papel_vocal],...["geral","demonstrado","autoavaliacao","teoria","harmonia","ritmo","percepcao","conjunto","tecnica_especifica","preparo"].map(k=>[labels[k],p.pontuacoes[k] == null ? "" : `${p.pontuacoes[k]}%`]),["Dificuldade",p.plano.dificuldade],["Meta 90 dias",p.plano.meta_90_dias],["Estudo semanal",p.plano.estudo_semanal]]; const csv="\uFEFF"+rows.map(row=>row.map(cell=>`"${String(cell).replaceAll('"','""')}"`).join(";")).join("\n"); downloadBlob(csv,`banda5_${safeFilename(answers.nome)}.csv`,"text/csv;charset=utf-8"); }
+function downloadCSV() { const p=buildExportPayload(), rows=[["Campo","Valor"],["Nome",p.participante.nome],["E-mail",p.participante.email],["Função",p.participante.funcao],["Papel vocal",p.participante.papel_vocal],...["geral","demonstrado","autoavaliacao","teoria","harmonia","ritmo","percepcao","conjunto","tecnica_especifica","preparo"].map(k=>[labels[k],p.pontuacoes[k] == null ? "" : `${p.pontuacoes[k]}%`]),["Dificuldade",p.plano.dificuldade],["Meta 90 dias",p.plano.meta_90_dias],["Estudo semanal",p.plano.estudo_semanal]]; const csv="\uFEFF"+rows.map(row=>row.map(csvCell).join(";")).join("\n"); downloadBlob(csv,`banda5_${safeFilename(answers.nome)}.csv`,"text/csv;charset=utf-8"); }
 
-function generatePDFReport() {
+async function submitDiagnosisToCloud() {
+  if (!window.BandDB?.configured || submittedProtocol) return;
+  const button = $("submitResultBtn"), status = $("submissionStatus");
+  button.disabled = true; button.textContent = "Enviando..."; status.className = "submission-status"; status.textContent = "Enviando suas respostas com segurança...";
+  try {
+    const result = await performCloudSubmission(); showResults(); showSubmissionSuccess(result);
+  } catch (error) {
+    console.error("Falha ao enviar diagnóstico", error); button.disabled = false; button.textContent = "Tentar enviar novamente"; status.className = "submission-status error"; status.textContent = cloudSubmissionErrorMessage(error);
+  }
+}
+
+async function performCloudSubmission() {
+  const result = await BandDB.submitDiagnosis(buildSubmissionPayload());
+  if (!result?.scores) throw new Error("O banco não devolveu a pontuação validada.");
+  submittedProtocol = result.id; verifiedScores = result.scores; verifiedReviewItems = Array.isArray(result.review_items) ? result.review_items : [];
+  return result;
+}
+
+function showSubmissionSuccess(result) {
+  const button = $("submitResultBtn"), status = $("submissionStatus");
+  button.classList.remove("hidden"); button.disabled = true; button.textContent = "Respostas enviadas"; status.className = "submission-status success";
+  status.innerHTML = `Pronto! O avaliador recebeu seu diagnóstico. Protocolo: <strong>${escapeHTML(String(result.id).slice(0, 8).toUpperCase())}</strong>`;
+}
+
+function cloudSubmissionErrorMessage(error) {
+  return String(error?.message || "").includes("AVALIACAO_ATUALIZADA") ? "A avaliação foi atualizada enquanto você respondia. Reinicie o diagnóstico para usar a versão mais recente." : "Não foi possível enviar agora. Verifique sua internet e tente novamente.";
+}
+
+async function finishCloudDiagnosis() {
+  nextBtn.disabled = true; backBtn.disabled = true; nextBtn.textContent = "Validando respostas..."; document.querySelector(".error-message")?.remove();
+  try { const result = await performCloudSubmission(); showResults(); showSubmissionSuccess(result); }
+  catch (error) {
+    console.error("Falha ao concluir diagnóstico", error); nextBtn.disabled = false; backBtn.disabled = false; nextBtn.textContent = "Tentar enviar novamente";
+    questionContainer.insertAdjacentHTML("beforeend", `<div class="error-message">${escapeHTML(cloudSubmissionErrorMessage(error))}</div>`);
+  }
+}
+
+function createSubmissionId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16)); bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  return [...bytes].map((byte, index) => `${[4,6,8,10].includes(index) ? "-" : ""}${byte.toString(16).padStart(2,"0")}`).join("");
+}
+
+function generateLegacyPDFReport() {
   const reportWindow = window.open("", "_blank");
   if (!reportWindow) { alert("O navegador bloqueou a abertura do relatório. Permita pop-ups e tente novamente."); return; }
   const p = buildExportPayload(), scores = p.pontuacoes, level = getLevel(scores.geral);

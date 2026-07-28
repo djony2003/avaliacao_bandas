@@ -2,4 +2,7 @@
 Rec.txt
 tmp/
 output/
-
+dist/
+.env
+.env.*
+!.env.example

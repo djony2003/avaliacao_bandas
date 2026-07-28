@@ -1,0 +1,9 @@
+{
+  "name": "avaliacao-bandas",
+  "version": "3.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node tools/build-production.mjs && node tools/verify-production.mjs",
+    "check": "node --check script.js && node --check backend.js && node --check supabase-config.js && node --check tools/build-production.mjs && node --check tools/verify-production.mjs"
+  }
+}
